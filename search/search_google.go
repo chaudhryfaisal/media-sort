@@ -1,9 +1,9 @@
 package mediasearch
 
 import (
-	"errors"
 	"fmt"
 	"log"
+	"strings"
 
 	"net/http"
 	"net/url"
@@ -29,7 +29,7 @@ func searchGoogle(query, year string, mediatype MediaType) ([]Result, error) {
 	v := url.Values{}
 	v.Set("btnI", "") //I'm feeling lucky
 	v.Set("q", query)
-	urlstr := "https://www.google.com.au/search?" + v.Encode()
+	urlstr := "https://www.google.com/search?" + v.Encode()
 	req, err := http.NewRequest("HEAD", urlstr, nil)
 	if err != nil {
 		return nil, err
@@ -46,17 +46,23 @@ func searchGoogle(query, year string, mediatype MediaType) ([]Result, error) {
 	defer resp.Body.Close()
 	//assume redirection
 	if resp.StatusCode != 302 {
-		return nil, errors.New("Google search failed")
+		return nil, fmt.Errorf("Google search failed with StatusCode=%d", resp.StatusCode)
 	}
 	//extract Location header URL
-	url, _ := url.Parse(resp.Header.Get("Location"))
-	if url.Host != "www.imdb.com" {
-		return nil, errors.New("Google IMDB redirection failed")
+	imdb, _ := url.Parse(resp.Header.Get("Location"))
+	if imdb.Host != "www.imdb.com" {
+		query, _ := url.ParseQuery(imdb.RawQuery)
+		q := query["q"][0]
+		if strings.Contains(q, "www.imdb.com") {
+			imdb, _ = url.Parse(q)
+		} else {
+			return nil, fmt.Errorf("Google IMDB redirection failed with Host=%s", imdb.Host)
+		}
 	}
 	//extract imdb ID
-	m := imdbIDRe.FindStringSubmatch(url.Path)
+	m := imdbIDRe.FindStringSubmatch(imdb.Path)
 	if len(m) == 0 {
-		return nil, fmt.Errorf("No IMDB match (%s)", url.Path)
+		return nil, fmt.Errorf("No IMDB match (%s)", imdb.Path)
 	}
 	//lookup imdb ID using OMDB
 	r, err := imdbGet(imdbID(m[1]))
