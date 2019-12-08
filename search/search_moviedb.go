@@ -11,11 +11,11 @@ import (
 func searchMovieDB(query, year string, mediatype MediaType) ([]Result, error) {
 	yearKey := "year"
 	path := "/search"
-	if mediatype == Movie {
-		path += "/movie"
-	} else if mediatype == Series {
+	if mediatype == Series {
 		yearKey = "first_air_date_year"
 		path += "/tv"
+	} else /*if mediatype == Movie*/ {
+		path += "/movie"
 	}
 	v := url.Values{}
 	v.Set("query", query)
