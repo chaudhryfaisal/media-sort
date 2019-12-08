@@ -14,9 +14,11 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-extldflags "-static"' .
 
 FROM scratch as run
+#FROM alpine as run
 
 COPY --from=build /app/media-sort /media-sort
 # Import the root ca-certificates
 COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+#ADD ./ca-certificates-plus-charles.crt /etc/ssl/certs/ca-certificates.crt
 
 ENTRYPOINT ["/media-sort"]
