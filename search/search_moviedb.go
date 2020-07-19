@@ -11,11 +11,11 @@ import (
 func searchMovieDB(query, year string, mediatype MediaType) ([]Result, error) {
 	yearKey := "year"
 	path := "/search"
-	if mediatype == Series {
+	if mediatype == Movie {
+		path += "/movie"
+	} else if mediatype == Series {
 		yearKey = "first_air_date_year"
 		path += "/tv"
-	} else /*if mediatype == Movie*/ {
-		path += "/movie"
 	}
 	v := url.Values{}
 	v.Set("query", query)
@@ -33,7 +33,7 @@ func searchMovieDB(query, year string, mediatype MediaType) ([]Result, error) {
 
 	s := &movieDBSearch{}
 	if err := json.NewDecoder(resp.Body).Decode(s); err != nil {
-		return nil, fmt.Errorf("omdb Search: Failed to decode: %s", err)
+		return nil, fmt.Errorf("movieDB search: Failed to decode: %s", err)
 	}
 	results := make([]Result, len(s.Results))
 	for i, mr := range s.Results {
@@ -81,7 +81,7 @@ func (mr movieDBResult) toResult() (Result, error) {
 		if len(m) == 0 {
 			return r, fmt.Errorf("movieDB error: No movie year: %s", mr.ReleaseDate)
 		}
-		r.Year = m[0]
+		r.Year = m[1]
 		return r, nil
 	} else if mr.Name != "" && mr.FirstAirDate != "" {
 		r.Type = Series
@@ -90,7 +90,7 @@ func (mr movieDBResult) toResult() (Result, error) {
 		if len(m) == 0 {
 			return Result{}, fmt.Errorf("movieDB error: No series year: %s", mr.FirstAirDate)
 		}
-		r.Year = m[0]
+		r.Year = m[1]
 		return r, nil
 	}
 	return r, fmt.Errorf("movieDB error: Unknown result: %+v", mr)

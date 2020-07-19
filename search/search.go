@@ -14,9 +14,8 @@ const debugMode = false
 type search func(string, string, MediaType) ([]Result, error)
 
 //various searches based on media-type
-var defaultSearches = []search{searchMovieDB, searchGoogle}
-var tvSearches = append([]search{searchTVMaze}, defaultSearches...)
-var movieSearches = defaultSearches
+var tvSearches = []search{searchTVMaze, searchMovieDB, searchGoogle}
+var movieSearches = []search{searchMovieDB, searchGoogle}
 
 //thread-safe global search cache
 //lock protects the cache/inflight maps
@@ -38,7 +37,6 @@ func SearchThreshold(query, year, mediatype string, threshold int) (Result, erro
 	if mediatype != "" && mt != Movie && mt != Series {
 		return Result{}, fmt.Errorf("Invalid media type (%s)", mediatype)
 	}
-
 	lock.Lock()
 	//cached searches are served instantly
 	r, exists := cache[query]
@@ -46,7 +44,6 @@ func SearchThreshold(query, year, mediatype string, threshold int) (Result, erro
 		lock.Unlock()
 		return r, nil
 	}
-
 	//duplicate searchs wait on the first
 	w, inf := inflight[query]
 	if inf {
@@ -54,7 +51,6 @@ func SearchThreshold(query, year, mediatype string, threshold int) (Result, erro
 		w.Wait()
 		return cache[query], nil
 	}
-
 	w = &sync.WaitGroup{}
 	w.Add(1)
 	inflight[query] = w
@@ -76,11 +72,10 @@ func SearchThreshold(query, year, mediatype string, threshold int) (Result, erro
 	}
 	log.Print(msg)
 	//search various search engines
-	var searcheEngines = defaultSearches
+	var searcheEngines = movieSearches
 	if MediaType(mediatype) == Series {
 		searcheEngines = tvSearches
 	}
-
 	//search returns results
 	var results []Result
 	var err error
@@ -90,10 +85,12 @@ func SearchThreshold(query, year, mediatype string, threshold int) (Result, erro
 			break
 		}
 	}
-	if len(results) == 0 {
+	if len(results) == 0 && err != nil {
 		return Result{}, fmt.Errorf("No results (%s)", err)
 	}
-
+	if len(results) == 0 {
+		return Result{}, fmt.Errorf("No results")
+	}
 	//matcher picks result (r)
 	m := matcher{query: query, year: year, threshold: threshold}
 	otherTypes := []Result{}
@@ -118,10 +115,8 @@ func SearchThreshold(query, year, mediatype string, threshold int) (Result, erro
 	if r, err = m.bestMatch(); err != nil {
 		return Result{}, err
 	}
-
 	lock.Lock()
 	cache[query] = r
 	lock.Unlock()
-
 	return r, nil
 }

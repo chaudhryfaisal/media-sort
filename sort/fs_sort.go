@@ -3,6 +3,7 @@ package mediasort
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
@@ -14,7 +15,6 @@ import (
 	"github.com/fatih/color"
 	mediasearch "github.com/jpillora/media-sort/search"
 	"github.com/jpillora/sizestr"
-
 	"gopkg.in/fsnotify.v1"
 )
 
@@ -27,16 +27,17 @@ type Config struct {
 	Extensions        string        `opts:"help=types of files that should be sorted"`
 	Concurrency       int           `opts:"help=search concurrency [warning] setting this too high can cause rate-limiting errors"`
 	FileLimit         int           `opts:"help=maximum number of files to search"`
+	NumDirs           int           `opts:"help=number of directories to include in search (default 0 where -1 means all dirs)"`
 	AccuracyThreshold int           `opts:"help=filename match accuracy threshold" default:"is 95, perfect match is 100"`
 	MinFileSize       sizestr.Bytes `opts:"help=minimum file size"`
 	Recursive         bool          `opts:"help=also search through subdirectories"`
 	DryRun            bool          `opts:"help=perform sort but don't actually move any files"`
 	SkipHidden        bool          `opts:"help=skip dot files"`
-	Hardlink          bool          `opts:"help=hardlink files to the new location instead of moving"`
+	Action            Action        `opts:"help=filesystem action used to sort files (copy|link|move)"`
+	HardLink          bool          `opts:"help=use hardlinks instead of symlinks (forces --action link)"`
 	Overwrite         bool          `opts:"help=overwrites duplicates"`
 	OverwriteIfLarger bool          `opts:"help=overwrites duplicates if the new file is larger"`
 	Watch             bool          `opts:"help=watch the specified directories for changes and re-sort on change"`
-	WatchOnlyTopDir   bool          `opts:"help=watch only the directories specified in the command line"`
 	WatchDelay        time.Duration `opts:"help=delay before next sort after a change"`
 	Verbose           bool          `opts:"help=verbose logs"`
 }
@@ -50,6 +51,7 @@ type fsSort struct {
 	stats     struct {
 		found, matched, moved int
 	}
+	linkType linkType
 }
 
 type fileSort struct {
@@ -59,6 +61,25 @@ type fileSort struct {
 	result *Result
 	err    error
 }
+
+// Action used to sort files
+type Action string
+
+const (
+	// MoveAction sorts by moving
+	MoveAction Action = "move"
+	// LinkAction sorts by linking
+	LinkAction Action = "link"
+	// CopyAction sorts by copying
+	CopyAction Action = "copy"
+)
+
+type linkType string
+
+const (
+	hardLink linkType = "hardLink"
+	symLink  linkType = "symLink"
+)
 
 //FileSystemSort performs a media sort
 //against the file system using the provided
@@ -76,13 +97,24 @@ func FileSystemSort(c Config) error {
 	if c.Overwrite && c.OverwriteIfLarger {
 		return errors.New("Overwrite is already specified, overwrite-if-larger is redundant")
 	}
-	if c.Hardlink && c.Overwrite {
-		return errors.New("Hardlink is already specified, Overwrite won't do anything")
+	if c.Action == LinkAction && c.Overwrite {
+		return errors.New("Link is already specified, Overwrite won't do anything")
+	}
+	switch c.Action {
+	case MoveAction, LinkAction, CopyAction:
+		break
+	default:
+		return errors.New("Provided action is not available")
 	}
 	//init fs sort
 	fs := &fsSort{
 		Config:    c,
 		validExts: map[string]bool{},
+		linkType:  symLink,
+	}
+	if c.HardLink {
+		fs.Action = LinkAction
+		fs.linkType = hardLink
 	}
 	for _, e := range strings.Split(c.Extensions, ",") {
 		fs.validExts["."+e] = true
@@ -165,24 +197,14 @@ func (fs *fsSort) sortAllFiles() error {
 }
 
 func (fs *fsSort) watch() error {
-	var dirsToWatch map[string]bool
-	if fs.WatchOnlyTopDir {
-		dirsToWatch = map[string]bool{}
-		for _, path := range fs.Targets {
-			dirsToWatch[path] = true
-		}
-	} else {
-		dirsToWatch = fs.dirs
-	}
-
-	if len(dirsToWatch) == 0 {
+	if len(fs.dirs) == 0 {
 		return errors.New("No directories to watch")
 	}
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
 		return fmt.Errorf("Failed to create file watcher: %s", err)
 	}
-	for dir := range dirsToWatch {
+	for dir := range fs.dirs {
 		if err := watcher.Add(dir); err != nil {
 			return fmt.Errorf("Failed to watch directory: %s", err)
 		}
@@ -200,7 +222,7 @@ func (fs *fsSort) watch() error {
 }
 
 func (fs *fsSort) add(path string, info os.FileInfo) error {
-	//skip hidden files and directories
+	//skip "hidden" files and directories
 	if fs.SkipHidden && strings.HasPrefix(info.Name(), ".") {
 		fs.verbf("skip hidden file: %s", path)
 		return nil
@@ -232,10 +254,6 @@ func (fs *fsSort) add(path string, info os.FileInfo) error {
 		if !fs.Recursive {
 			return errors.New("Recursive mode (-r) is required to sort directories")
 		}
-		if path == fs.TVDir || path == fs.MovieDir {
-			fs.verbf("skip output directory: %s", path)
-			return nil
-		}
 		//note directory
 		fs.dirs[path] = true
 		//add all files in dir
@@ -257,7 +275,7 @@ func (fs *fsSort) add(path string, info os.FileInfo) error {
 }
 
 func (fs *fsSort) sortFile(file *fileSort) error {
-	result, err := SortThreshold(file.path, fs.AccuracyThreshold)
+	result, err := SortDepthThreshold(file.path, fs.NumDirs, fs.AccuracyThreshold)
 	if err != nil {
 		return err
 	}
@@ -275,7 +293,6 @@ func (fs *fsSort) sortFile(file *fileSort) error {
 		return fmt.Errorf("Invalid result type: %s", result.MType)
 	}
 	newPath = filepath.Join(baseDir, newPath)
-
 	//check for subs.srt file
 	pathSubs := strings.TrimSuffix(result.Path, filepath.Ext(result.Path)) + ".srt"
 	_, err = os.Stat(pathSubs)
@@ -284,9 +301,7 @@ func (fs *fsSort) sortFile(file *fileSort) error {
 	if hasSubs {
 		subsExt = "," + color.GreenString("srt")
 	}
-
-	//DEBUG
-	// log.Printf("SUCCESS = D%d #%d\n  %s\n  %s", r.Distance, len(query), query, r.Title)
+	//found sort path
 	log.Printf("[#%d/%d] %s\n  └─> %s", file.id, len(fs.sorts), color.GreenString(result.Path)+subsExt, color.GreenString(newPath)+subsExt)
 	if fs.DryRun {
 		return nil //don't actually move
@@ -294,7 +309,6 @@ func (fs *fsSort) sortFile(file *fileSort) error {
 	if result.Path == newPath {
 		return nil //already sorted
 	}
-
 	//check already exists
 	if newInfo, err := os.Stat(newPath); err == nil {
 		fileIsLarger := file.info.Size() > newInfo.Size()
@@ -308,30 +322,20 @@ func (fs *fsSort) sortFile(file *fileSort) error {
 			return nil // File are the same
 		}
 	}
-
-	//mkdir -p
+	// mkdir -p
 	err = os.MkdirAll(filepath.Dir(newPath), 0755)
 	if err != nil {
 		return err //failed to mkdir
 	}
-	//mv or hardlink
-	err = nil
-	if fs.Hardlink {
-		err = os.Link(result.Path, newPath)
-	} else {
-		err = os.Rename(result.Path, newPath)
-	}
+	// action the file
+	err = fs.action(result.Path, newPath)
 	if err != nil {
 		return err //failed to move
 	}
-	//if .srt file exists for the file, mv it too
+	//if .srt file exists for the file, action it too
 	if hasSubs {
 		newPathSubs := strings.TrimSuffix(newPath, filepath.Ext(newPath)) + ".srt"
-		if fs.Hardlink {
-			err = os.Link(pathSubs, newPathSubs) //best-effort
-		} else {
-			err = os.Rename(pathSubs, newPathSubs) //best-effort
-		}
+		fs.action(pathSubs, newPathSubs) //best-effort
 	}
 	return nil
 }
@@ -340,4 +344,57 @@ func (fs *fsSort) verbf(f string, args ...interface{}) {
 	if fs.Verbose {
 		log.Printf(f, args...)
 	}
+}
+
+func (fs *fsSort) action(src, dst string) error {
+	switch fs.Action {
+	case MoveAction:
+		return move(src, dst)
+	case CopyAction:
+		return copy(src, dst)
+	case LinkAction:
+		return link(src, dst, fs.linkType)
+	}
+	return errors.New("unknown action")
+}
+
+func move(src, dst string) error {
+	err := os.Rename(src, dst)
+	// cross device move
+	if err != nil && strings.Contains(err.Error(), "cross-device") {
+		if err := copy(src, dst); err != nil {
+			return err
+		}
+		if err := os.Remove(src); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func copy(src, dst string) error {
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+	dstFile, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer dstFile.Close()
+	if _, err := io.Copy(dstFile, srcFile); err != nil {
+		return err
+	}
+	return nil
+}
+
+func link(src, dst string, linkType linkType) error {
+	switch linkType {
+	case hardLink:
+		return os.Link(src, dst)
+	case symLink:
+		return os.Symlink(src, dst)
+	}
+	panic("wrong link type, please open an issue")
 }
