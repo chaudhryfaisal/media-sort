@@ -6,7 +6,11 @@ BASE_IMAGE_URL := $(BASE)/$(NAME)
 IMAGE_URL := $(BASE_IMAGE_URL):$(GITCOMMIT)
 
 TEST_CMD_ARGS :=-v --recursive --min-file-size=0 --overwrite --accuracy-threshold 80 --tv-dir /workspace/media/tv --movie-dir /workspace/media/movies --concurrency 1 /workspace/media/raw
-
+build-push-multi-arch:
+	for a in arm64 amd64; do echo "Building $$a";\
+		docker build --build-arg GOARCH=$$a --pull -t $(BASE_IMAGE_URL):$$a-$(GITCOMMIT) . ;\
+		docker push $(BASE_IMAGE_URL):$$a-$(GITCOMMIT) ;\
+	done
 build:
 	docker build --pull -t ${IMAGE_URL} .
 

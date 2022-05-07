@@ -9,12 +9,11 @@ RUN go mod download
 
 # Copy the source from the current directory to the Working Directory inside the container
 COPY . .
+ARG GOOS=linux
+ARG GOARCH=amd64
+RUN CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -a -ldflags '-extldflags "-static"' -o media-sort . 
 
-# Build the Go app
-RUN CGO_ENABLED=0 GOOS=linux go build -a -ldflags '-extldflags "-static"' .
-
-FROM scratch as run
-#FROM alpine as run
+FROM scratch
 
 COPY --from=build /app/media-sort /media-sort
 # Import the root ca-certificates
